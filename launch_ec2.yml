@@ -1,0 +1,88 @@
+---
+- name: Generate SSH key and launch EC2 instance in default VPC and SG
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    region: "eu-north-1"
+    key_name: "controller-generated-kp"
+    private_key_path: "/home/vboxuser/.ssh/controller-generated-kp"
+    public_key_path: "/home/vboxuser/.ssh/controller-generated-kp.pub"
+    ami_id: "ami-042b4708b1d05f512"
+    instance_type: "t3.micro"
+
+  tasks:
+    - name: Ensure ~/.ssh directory exists
+      file:
+        path: "{{ private_key_path | dirname }}"
+        state: directory
+        mode: '0700'
+
+    - name: Generate SSH key pair
+      community.crypto.openssh_keypair:
+        path: "{{ private_key_path }}"
+        type: rsa
+        size: 2048
+        force: true
+        mode: '0600'
+
+    - name: Read public key content
+      slurp:
+        src: "{{ public_key_path }}"
+      register: pubkey
+
+    - name: Register SSH public key as AWS EC2 key pair
+      amazon.aws.ec2_key:
+        name: "{{ key_name }}"
+        region: "{{ region }}"
+        key_material: "{{ pubkey['content'] | b64decode }}"
+        state: present
+
+    - name: Get Default VPC ID
+      amazon.aws.ec2_vpc_net_info:
+        region: "{{ region }}"
+        filters:
+          isDefault: true
+      register: default_vpc_info
+
+    - name: Get default subnet ID from default VPC
+      amazon.aws.ec2_vpc_subnet_info:
+        region: "{{ region }}"
+        filters:
+          vpc-id: "{{ default_vpc_info.vpcs[0].id }}"
+      register: subnet_info
+
+    - name: Get default security group ID
+      amazon.aws.ec2_group_info:
+        region: "{{ region }}"
+        filters:
+          vpc-id: "{{ default_vpc_info.vpcs[0].id }}"
+          group-name: default
+      register: sg_info
+
+    - name: Add insecure SSH rule (22/tcp from 0.0.0.0/0) to default SG
+      amazon.aws.ec2_group:
+        name: "{{ sg_info.security_groups[0].group_name }}"
+        group_id: "{{ sg_info.security_groups[0].group_id }}"
+        description: "Default security group"
+        region: "{{ region }}"
+        rules:
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            cidr_ip: 0.0.0.0/0
+        state: present
+
+    - name: Launch EC2 Instance in default VPC
+      amazon.aws.ec2_instance:
+        name: "ComplianceTarget"
+        region: "{{ region }}"
+        image_id: "{{ ami_id }}"
+        instance_type: "{{ instance_type }}"
+        key_name: "{{ key_name }}"
+        wait: true
+        network:
+          assign_public_ip: true
+        vpc_subnet_id: "{{ subnet_info.subnets[0].id }}"
+        security_group: "{{ sg_info.security_groups[0].group_id }}"
