@@ -1,0 +1,31 @@
+- name: Disable Public Access to All EKS Clusters in eu-north-1
+  hosts: localhost
+  gather_facts: false
+  vars:
+    aws_region: "eu-north-1"
+
+  tasks:
+    - name: Get list of EKS clusters in {{ aws_region }}
+      command: >
+        aws eks list-clusters --region {{ aws_region }} --output json
+      register: cluster_list_raw
+
+    - name: Parse cluster names
+      set_fact:
+        eks_clusters: "{{ cluster_list_raw.stdout | from_json | dict2items | selectattr('key', 'equalto', 'clusters') | map(attribute='value') | list | first }}"
+
+    - name: Show all clusters
+      debug:
+        msg: "{{ eks_clusters }}"
+
+    - name: Disable public access for each EKS cluster
+      loop: "{{ eks_clusters }}"
+      loop_control:
+        loop_var: cluster_name
+      command: >
+        aws eks update-cluster-config
+        --name {{ cluster_name }}
+        --region {{ aws_region }}
+        --resources-vpc-config endpointPublicAccess=false,endpointPrivateAccess=true
+      register: access_update
+      failed_when: access_update.rc != 0 and "'ResourceInUseException'" not in access_update.stderr
