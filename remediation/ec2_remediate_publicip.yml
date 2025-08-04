@@ -1,0 +1,82 @@
+---
+- name: Remediate EC2 instances with public IPs in eu-north-1
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  vars:
+    region: eu-north-1
+
+  tasks:
+    - name: Fetch all EC2 instances in region
+      amazon.aws.ec2_instance_info:
+        region: "{{ region }}"
+      register: ec2_info
+
+    - name: Filter instances with public IPs
+      set_fact:
+        instances_with_public_ip: "{{ ec2_info.instances | selectattr('public_ip_address', 'defined') | list }}"
+
+    - name: Display instances with public IPs
+      debug:
+        msg: "Instance {{ item.instance_id }} has public IP {{ item.public_ip_address }}"
+      loop: "{{ instances_with_public_ip }}"
+      when: instances_with_public_ip | length > 0
+
+    - name: Build instance-to-ENI map
+      set_fact:
+        instance_eni_map: >-
+          {{
+            dict(
+              instances_with_public_ip | map(attribute='instance_id') | list
+              | zip(instances_with_public_ip | map(attribute='network_interfaces') | map('first') | map(attribute='network_interface_id') | list)
+            )
+          }}
+
+    - name: Stop instances before remediation
+      amazon.aws.ec2_instance:
+        region: "{{ region }}"
+        instance_ids: "{{ item }}"
+        state: stopped
+        wait: true
+      loop: "{{ instance_eni_map.keys() }}"
+
+    - name: Disable auto-assign public IP on ENIs
+      shell: >
+        aws ec2 modify-network-interface-attribute
+        --network-interface-id {{ instance_eni_map[item] }}
+        --no-associate-public-ip-address
+        --region {{ region }}
+      loop: "{{ instance_eni_map.keys() }}"
+
+    - name: Check for Elastic IP associations
+      shell: >
+        aws ec2 describe-addresses
+        --filters Name=instance-id,Values={{ item }}
+        --query "Addresses[0].AssociationId"
+        --region {{ region }} --output text
+      register: eip_assoc_ids
+      changed_when: false
+      loop: "{{ instance_eni_map.keys() }}"
+
+    - name: Disassociate Elastic IP if associated
+      shell: >
+        aws ec2 disassociate-address
+        --association-id {{ item.stdout }}
+        --region {{ region }}
+      when: item.stdout is defined and item.stdout != "None"
+      loop: "{{ eip_assoc_ids.results }}"
+
+    - name: Start instances after remediation
+      amazon.aws.ec2_instance:
+        region: "{{ region }}"
+        instance_ids: "{{ item }}"
+        state: running
+        wait: true
+      loop: "{{ instance_eni_map.keys() }}"
+
+    - name: Done - show final status
+      debug:
+        msg: "Remediation complete for instance {{ item }}"
+      loop: "{{ instance_eni_map.keys() }}"
+
