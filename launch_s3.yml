@@ -1,0 +1,17 @@
+---
+- name: Create S3 bucket
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  collections:
+    - community.aws
+  vars:
+    bucket_name: charles-compliance-bucket-demo-007  # Must be globally unique
+    region: eu-north-1
+
+  tasks:
+    - name: Create S3 bucket
+      s3_bucket:
+        name: "{{ bucket_name }}"
+        region: "{{ region }}"
+        state: present
