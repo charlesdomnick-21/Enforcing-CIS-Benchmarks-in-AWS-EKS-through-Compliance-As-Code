@@ -1,0 +1,78 @@
+---
+- name: Remediate CIS Benchmarks
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    region: eu-north-1
+    default_group: default-user-group
+    group_policy_name: DefaultAccessPolicy
+    group_policy_path: /tmp/default-access-policy.json
+
+    # List of users to exclude from group modification
+    exclude_users:
+      - ec2_compliance_user
+
+  tasks:
+
+    - name: Ensure default IAM group exists
+      community.aws.iam_group:
+        name: "{{ default_group }}"
+        state: present
+        region: "{{ region }}"
+
+    - name: Get all IAM users
+      shell: aws iam list-users --query "Users[*].UserName" --output text --region {{ region }}
+      register: iam_users_raw
+
+    - name: Convert IAM users to list
+      set_fact:
+        all_iam_users: "{{ iam_users_raw.stdout.split() }}"
+
+    - name: List IAM groups for each user
+      shell: |
+        aws iam list-groups-for-user \
+          --user-name {{ item }} \
+          --query "Groups[*].GroupName" --output text --region {{ region }}
+      loop: "{{ all_iam_users }}"
+      register: group_membership_check
+      changed_when: false
+
+    - name: Add users without groups to default group (excluding sensitive users)
+      community.aws.iam_group:
+        name: "{{ default_group }}"
+        users: "{{ item.item }}"
+        state: present
+        region: "{{ region }}"
+      loop: "{{ group_membership_check.results }}"
+      when:
+        - item.stdout_lines | length == 0
+        - item.item not in exclude_users
+
+    - name: Get all IAM groups
+      shell: aws iam list-groups --query "Groups[*].GroupName" --output text --region {{ region }}
+      register: all_iam_groups_raw
+
+    - name: Convert IAM groups to list
+      set_fact:
+        all_iam_groups: "{{ all_iam_groups_raw.stdout.split() }}"
+
+    - name: Get users in each IAM group
+      shell: |
+        aws iam get-group \
+          --group-name {{ item }} \
+          --query "Users[*].UserName" --output text --region {{ region }}
+      loop: "{{ all_iam_groups }}"
+      register: group_users_check
+      changed_when: false
+
+    - name: Delete IAM groups that have no users and are not the default group
+      community.aws.iam_group:
+        name: "{{ item.item }}"
+        state: absent
+        region: "{{ region }}"
+      loop: "{{ group_users_check.results }}"
+      when:
+        - item.stdout_lines | length == 0
+        - item.item != default_group
