@@ -1,0 +1,71 @@
+---
+- name: Create EKS Cluster
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  vars:
+    region: "eu-north-1"
+    cluster_name: "eks-cluster-15"
+    eksctl_config_file: "/tmp/eksctl-config.yaml"
+
+  tasks:
+
+    - name: Generate eksctl config file
+      copy:
+        dest: "{{ eksctl_config_file }}"
+        content: |
+          apiVersion: eksctl.io/v1alpha5
+          kind: ClusterConfig
+
+          metadata:
+            name: {{ cluster_name }}
+            region: {{ region }}
+            version: "1.28"
+
+          vpc:
+            clusterEndpoints:
+              publicAccess: true
+              privateAccess: true
+
+          cloudWatch:
+            clusterLogging:
+              enableTypes: []  # Logging disabled
+
+    - name: Create EKS cluster
+      shell: eksctl create cluster -f "{{ eksctl_config_file }}"
+      register: eksctl_output
+      changed_when: "'created' in eksctl_output.stdout"
+
+    - name: Update kubeconfig
+      shell: aws eks update-kubeconfig --name {{ cluster_name }} --region {{ region }}
+
+eksss reme upgrade
+vboxuser@controller:~/compliance-automation/eks$ cat upgrade_one_cluster.yml
+- name: Get current Kubernetes version for {{ cluster_name }}
+  command: >
+    aws eks describe-cluster
+    --name {{ cluster_name }}
+    --region {{ aws_region }}
+    --query 'cluster.version'
+    --output text
+  register: version_out
+  changed_when: false
+
+- name: Set current version fact
+  set_fact:
+    current_version: "{{ version_out.stdout }}"
+
+- name: Debug current version
+  debug:
+    msg: "Cluster {{ cluster_name }} is on version {{ current_version }}"
+
+- name: Upgrade EKS cluster to version {{ target_version }} if needed
+  command: >
+    aws eks update-cluster-version
+    --name {{ cluster_name }}
+    --region {{ aws_region }}
+    --kubernetes-version {{ target_version }}
+  when: current_version != target_version
+  register: upgrade_out
+  failed_when: upgrade_out.rc != 0 and "'ResourceInUseException'" not in upgrade_out.stderr
