@@ -1,0 +1,31 @@
+- name: Enable Control Plane Logging for All EKS Clusters in eu-north-1
+  hosts: localhost
+  gather_facts: false
+  vars:
+    aws_region: "eu-north-1"
+
+  tasks:
+    - name: Get list of EKS clusters in {{ aws_region }}
+      command: >
+        aws eks list-clusters --region {{ aws_region }} --output json
+      register: cluster_list_raw
+
+    - name: Extract cluster names
+      set_fact:
+        eks_clusters: "{{ cluster_list_raw.stdout | from_json | dict2items | selectattr('key', 'equalto', 'clusters') | map(attribute='value') | list | first }}"
+
+    - name: Debug - list of clusters found
+      debug:
+        msg: "{{ eks_clusters }}"
+
+    - name: Enable all control plane logs for each cluster
+      loop: "{{ eks_clusters }}"
+      loop_control:
+        loop_var: cluster_name
+      command: >
+        aws eks update-cluster-config
+        --name {{ cluster_name }}
+        --region {{ aws_region }}
+        --logging '{"clusterLogging":[{"types":["api","audit","authenticator","controllerManager","scheduler"],"enabled":true}]}'
+      register: log_update
+      failed_when: log_update.rc != 0 and "'ResourceInUseException'" not in log_update.stderr
