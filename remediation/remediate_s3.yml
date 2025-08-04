@@ -1,0 +1,43 @@
+---
+- name: Identify and remediate non-compliant S3 buckets
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  collections:
+    - amazon.aws
+
+  vars:
+    region: eu-north-1
+    non_compliant_buckets: []
+
+  tasks:
+
+    - name: Get list of all S3 buckets
+      amazon.aws.aws_s3_bucket_info:
+      register: s3_info
+
+    - name: Check versioning status for each bucket
+      amazon.aws.aws_s3_bucket_info:
+        name: "{{ item.name }}"
+      loop: "{{ s3_info.buckets }}"
+      register: versioning_check
+
+    - name: Identify buckets with versioning not enabled
+      set_fact:
+        non_compliant_buckets: "{{ non_compliant_buckets + [item.invocation.module_args.name] }}"
+      when: item.versioning.Status | default('Disabled') != 'Enabled'
+      loop: "{{ versioning_check.results }}"
+
+    - name: Show non-compliant buckets
+      debug:
+        msg: "Versioning NOT enabled for bucket: {{ item }}"
+      loop: "{{ non_compliant_buckets }}"
+
+    - name: Enable versioning on non-compliant buckets
+      amazon.aws.s3_bucket:
+        name: "{{ item }}"
+        versioning: yes
+        region: "{{ region }}"
+        state: present
+      loop: "{{ non_compliant_buckets }}"
