@@ -1,0 +1,81 @@
+---
+- name: Revoke public SSH access from all EC2 instances in eu-north-1
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    region: "eu-north-1"
+
+  tasks:
+
+    - name: Get all EC2 instance IDs in eu-north-1
+      shell: >
+        aws ec2 describe-instances \
+          --region {{ region }} \
+          --query "Reservations[].Instances[].InstanceId" \
+          --output text
+      register: ec2_instances
+      failed_when: ec2_instances.rc != 0
+
+    - name: Set list of instance IDs
+      set_fact:
+        instance_ids: "{{ ec2_instances.stdout.split() }}"
+
+    - name: Get all Security Group IDs for the instances
+      shell: >
+        aws ec2 describe-instances \
+          --region {{ region }} \
+          --instance-ids {{ instance_ids | join(' ') }} \
+          --query "Reservations[].Instances[].SecurityGroups[].GroupId" \
+          --output text
+      register: sg_ids_raw
+      failed_when: sg_ids_raw.rc != 0
+
+    - name: Set unique Security Group IDs
+      set_fact:
+        sg_ids: "{{ sg_ids_raw.stdout.split() | unique }}"
+
+    - name: Get full details of the security groups
+      shell: >
+        aws ec2 describe-security-groups \
+          --region {{ region }} \
+          --group-ids {{ sg_ids | join(' ') }}
+      register: sg_details
+      failed_when: sg_details.rc != 0
+
+    - name: Identify SGs with public SSH access
+      set_fact:
+        ssh_sgs: >-
+          {{
+            sg_details.stdout | from_json | json_query(
+              "SecurityGroups[?IpPermissions[?FromPort==`22` && ToPort==`22` && IpProtocol=='tcp' && IpRanges[?CidrIp=='0.0.0.0/0']]]"
+            )
+          }}
+
+    - name: Revoke SSH 22/tcp rule from SGs with public SSH
+      when: ssh_sgs | length > 0
+      block:
+        - name: Revoke public SSH rule
+          loop: "{{ ssh_sgs }}"
+          loop_control:
+            label: "{{ item.GroupId }}"
+          command: >
+            aws ec2 revoke-security-group-ingress
+            --region {{ region }}
+            --group-id {{ item.GroupId }}
+            --protocol tcp
+            --port 22
+            --cidr 0.0.0.0/0
+          register: revoke_results
+          ignore_errors: true
+
+        - name: Show revoked rules
+          debug:
+            msg: "Revoked SSH rule from SG: {{ item.item.GroupId }}"
+          loop: "{{ revoke_results.results }}"
+          when: item.rc == 0
+
+    - name: No SGs found with public SSH access
+      when: ssh_sgs | length == 0
+      debug:
+        msg: "No security groups found with SSH open to 0.0.0.0/0"
